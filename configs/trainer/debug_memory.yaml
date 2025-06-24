@@ -1,0 +1,15 @@
+# Trainer configuration for debugging memory leaks
+defaults:
+  - simple.medium
+
+# Memory tracking settings
+memory_tracking_enabled: true
+memory_report_interval: 50      # Report every 50 epochs for faster feedback
+memory_leak_threshold_mb: 1.0   # Lower threshold for debugging (1MB/epoch)
+
+# Shorter training for debugging
+total_timesteps: 100000
+checkpoint_interval: 100
+evaluate_interval: 0            # Disable evaluation during debugging
+wandb_checkpoint_interval: 0    # Disable wandb uploads during debugging
+replay_interval: 0              # Disable replay generation

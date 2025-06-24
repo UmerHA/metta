@@ -39,7 +39,7 @@ def run_memory_test(epochs: int = 500):
     config_dir = os.path.join(os.path.dirname(__file__), "..", "configs")
     config_dir = os.path.abspath(config_dir)
 
-    with initialize_config_dir(config_path=config_dir, version_base=None):
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
         # Load a minimal config for testing
         cfg = compose(
             config_name="train_job",

@@ -14,6 +14,14 @@ def get_object_size(obj: Any, seen: set | None = None) -> int:
     Returns:
         Total size in bytes
     """
+    # Handle torch tensors specially
+    try:
+        import torch
+        if isinstance(obj, torch.Tensor):
+            return obj.element_size() * obj.nelement()
+    except ImportError:
+        pass
+
     size = sys.getsizeof(obj)
     if seen is None:
         seen = set()

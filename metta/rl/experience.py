@@ -315,7 +315,7 @@ class Experience:
 
         return stats
 
-        def cleanup_lstm_states(self, valid_env_ids: Optional[set] = None) -> None:
+    def cleanup_lstm_states(self, valid_env_ids: Optional[set] = None) -> None:
         """Clean up LSTM states for environments that no longer exist.
 
         Args:
