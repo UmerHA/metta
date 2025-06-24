@@ -34,6 +34,7 @@ from metta.sim.simulation import Simulation
 from metta.sim.simulation_config import SimulationSuiteConfig, SingleEnvSimulationConfig
 from metta.sim.simulation_suite import SimulationSuite
 from metta.util.heartbeat import record_heartbeat
+from metta.util.memory_tracker import MemoryTracker
 from metta.util.system_monitor import SystemMonitor
 from metta.util.wandb.wandb_context import WandbRun
 
@@ -101,6 +102,11 @@ class MettaTrainer:
             logger=logger,
             auto_start=True,  # Start monitoring immediately
         )
+
+        # Initialize memory tracker for debugging potential leaks
+        self.memory_tracker = MemoryTracker()
+        self._memory_report_interval = 100  # Report every 100 epochs
+        self._max_raw_infos_size = 0  # Track max size for debugging
 
         curriculum_config = trainer_cfg.get("curriculum", trainer_cfg.get("env", {}))
         env_overrides = DictConfig({"env_overrides": trainer_cfg.env_overrides})
@@ -257,6 +263,10 @@ class MettaTrainer:
         while self.agent_step < trainer_cfg.total_timesteps:
             steps_before = self.agent_step
 
+            # Track memory usage for debugging
+            if self._master and self.epoch % 10 == 0:
+                self._track_memory_usage()
+
             with self.torch_profiler:
                 self._rollout()
                 self._train()
@@ -303,6 +313,17 @@ class MettaTrainer:
 
             if trainer_cfg.replay_interval != 0 and self.epoch % trainer_cfg.replay_interval == 0:
                 self._generate_and_upload_replay()
+
+            # Print memory report periodically
+            if self._master and self.epoch % self._memory_report_interval == 0 and self.epoch > 0:
+                self.memory_tracker.print_report(self.epoch, logger)
+
+                # Check for potential memory leaks
+                potential_leaks = self.memory_tracker.get_potential_leaks(
+                    threshold_bytes_per_epoch=5 * 1024 * 1024  # 5MB per epoch
+                )
+                if potential_leaks:
+                    logger.warning(f"Potential memory leaks detected in: {potential_leaks}")
 
             self._on_train_step()
 
@@ -379,6 +400,9 @@ class MettaTrainer:
         raw_infos = []  # Collect raw info for batch processing later
         experience.reset_for_rollout()
 
+        # Track max raw_infos size for debugging
+        max_raw_infos_size = 0
+
         while not experience.ready_for_training:
             with self.timer("_rollout.env"):
                 o, r, d, t, info, env_id, mask = self.vecenv.recv()
@@ -454,6 +478,8 @@ class MettaTrainer:
             # distributed training) are handled separately and not aggregated here.
             if info:
                 raw_infos.extend(info)
+                max_raw_infos_size = max(max_raw_infos_size, len(raw_infos))
+                self._max_raw_infos_size = max(self._max_raw_infos_size, len(raw_infos))
 
             with self.timer("_rollout.env"):
                 self.vecenv.send(actions.cpu().numpy().astype(dtype_actions))
@@ -462,6 +488,13 @@ class MettaTrainer:
         for i in raw_infos:
             for k, v in unroll_nested_dict(i):
                 infos[k].append(v)
+
+        # Log max raw_infos size for debugging (every 100 epochs)
+        if self._master and self.epoch % 100 == 0 and max_raw_infos_size > 0:
+            logger.debug(f"Max raw_infos size during rollout: {max_raw_infos_size}")
+
+        # Clear raw_infos to prevent memory accumulation
+        raw_infos.clear()
 
         # Batch process stats more efficiently
         for k, v in infos.items():
@@ -479,8 +512,11 @@ class MettaTrainer:
                     except TypeError:
                         self.stats[k] = [self.stats[k], v]  # fallback: bundle as list
 
+        # Clear infos after processing to prevent memory accumulation
+        infos.clear()
+
         # TODO: Better way to enable multiple collects
-        return self.stats, infos
+        return self.stats, None
 
     @with_instance_timer("_train")
     def _train(self):
@@ -1055,6 +1091,44 @@ class MettaTrainer:
         # processes generate uncorrelated environments in distributed training
         rank = int(os.environ.get("RANK", 0))
         self.vecenv.async_reset(self.cfg.seed + rank)
+
+    def _track_memory_usage(self):
+        """Track memory usage of key objects that could potentially leak."""
+        # Track the stats dictionary
+        self.memory_tracker.track("trainer.stats", self.stats, self.epoch)
+
+        # Track experience buffer LSTM states
+        if hasattr(self.experience, 'lstm_h'):
+            self.memory_tracker.track("experience.lstm_h", self.experience.lstm_h, self.epoch)
+            self.memory_tracker.track("experience.lstm_c", self.experience.lstm_c, self.epoch)
+
+        # Track losses object
+        self.memory_tracker.track("trainer.losses", self.losses, self.epoch)
+
+        # Track the evals dictionary
+        self.memory_tracker.track("trainer.evals", self.evals, self.epoch)
+
+        # Track policy store
+        self.memory_tracker.track("policy_store", self.policy_store, self.epoch)
+
+        # Track system monitor history
+        if hasattr(self.system_monitor, '_metrics'):
+            self.memory_tracker.track("system_monitor._metrics", self.system_monitor._metrics, self.epoch)
+
+        # Track wandb_run if available
+        if self.wandb_run is not None:
+            self.memory_tracker.track("wandb_run", self.wandb_run, self.epoch)
+
+        # Track torch profiler if enabled
+        if self.torch_profiler is not None:
+            self.memory_tracker.track("torch_profiler", self.torch_profiler, self.epoch)
+
+        # Track max raw_infos size observed
+        if self._max_raw_infos_size > 0:
+            # Create a dummy list of that size to track memory impact
+            dummy_list = [None] * self._max_raw_infos_size
+            self.memory_tracker.track("max_raw_infos_size", dummy_list, self.epoch)
+            del dummy_list
 
     def _load_policy(self, checkpoint, policy_store, metta_grid_env):
         """Load policy from checkpoint, initial_policy.uri, or create new."""

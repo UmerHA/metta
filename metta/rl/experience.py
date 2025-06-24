@@ -18,7 +18,7 @@ Key features:
 - Manages minibatch creation for training
 """
 
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import numpy as np
 import torch
@@ -310,4 +310,30 @@ class Experience:
             stats["actions_mean"] = self.actions.mean().item()
             stats["actions_std"] = self.actions.std().item()
 
+        # Add LSTM state tracking info for debugging
+        stats["lstm_state_count"] = len(self.lstm_h)
+
         return stats
+
+        def cleanup_lstm_states(self, valid_env_ids: Optional[set] = None) -> None:
+        """Clean up LSTM states for environments that no longer exist.
+
+        Args:
+            valid_env_ids: Set of valid environment IDs. If None, keeps all states.
+        """
+        if valid_env_ids is None:
+            return
+
+        # Find env_ids to remove
+        env_ids_to_remove = []
+        for env_id in self.lstm_h.keys():
+            if env_id not in valid_env_ids:
+                env_ids_to_remove.append(env_id)
+
+        # Remove invalid env_ids
+        for env_id in env_ids_to_remove:
+            del self.lstm_h[env_id]
+            del self.lstm_c[env_id]
+
+        if env_ids_to_remove:
+            print(f"Cleaned up LSTM states for {len(env_ids_to_remove)} invalid env_ids")
