@@ -418,9 +418,10 @@ class MettaTrainer:
                     assert_shape(actions, ("BT", 2), "actions")
 
                 # Store LSTM state for performance
-                lstm_state_to_store = None
-                if state.lstm_h is not None:
-                    lstm_state_to_store = {"lstm_h": state.lstm_h, "lstm_c": state.lstm_c}
+                lstm_state_to_store = {
+                    "lstm_h": state.lstm_h.detach() if state.lstm_h is not None else None,
+                    "lstm_c": state.lstm_c.detach() if state.lstm_c is not None else None,
+                }
 
                 if str(self.device).startswith("cuda"):
                     torch.cuda.synchronize()
@@ -543,7 +544,7 @@ class MettaTrainer:
                 new_logprobs = new_logprobs.reshape(minibatch["logprobs"].shape)
                 logratio = new_logprobs - minibatch["logprobs"]
                 importance_sampling_ratio = logratio.exp()
-                experience.update_ratio(minibatch["indices"], importance_sampling_ratio)
+                experience.update_ratio(minibatch["indices"], importance_sampling_ratio.detach())
 
                 with torch.no_grad():
                     approx_kl = ((importance_sampling_ratio - 1) - logratio).mean()
@@ -612,7 +613,7 @@ class MettaTrainer:
                 )
 
                 # Update values in experience buffer
-                experience.update_values(minibatch["indices"], newvalue.view(minibatch["values"].shape))
+                experience.update_values(minibatch["indices"], newvalue.view(minibatch["values"].shape).detach())
 
                 if self.losses is None:
                     raise ValueError("self.losses is None")
