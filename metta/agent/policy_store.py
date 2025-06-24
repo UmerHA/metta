@@ -184,18 +184,49 @@ class PolicyStore:
                 "train_time": 0,
             },
         )
-        self.save_policy(path, policy, pr)
+        self.save_policy(path, policy, pr, env=env)
         pr._policy = policy
         return pr
 
-    def save(self, name: str, path: str, policy: nn.Module, metadata: dict) -> PolicyRecord:
+    def save(self, name: str, path: str, policy: nn.Module, metadata: dict, env=None) -> PolicyRecord:
         """Convenience method to create and save a policy in one step."""
         pr = PolicyRecord(self, name, "file://" + path, metadata)
-        return self.save_policy(path, policy, pr)
+        return self.save_policy(path, policy, pr, env=env)
 
-    def save_policy(self, path: str, policy: nn.Module, pr: PolicyRecord) -> PolicyRecord:
-        """Save a policy and its metadata using torch.package."""
+    def save_policy(self, path: str, policy: nn.Module, pr: PolicyRecord, env=None) -> PolicyRecord:
+        """Save a policy and its metadata using torch.package.
+
+        Args:
+            path: Path to save the policy
+            policy: The policy module to save
+            pr: PolicyRecord with metadata
+            env: Optional environment (required if policy is from torch.package)
+        """
         logger.info(f"Saving policy to {path} using torch.package")
+
+        # Check if policy is from torch.package and handle it
+        if hasattr(policy, "__class__") and policy.__class__.__module__.startswith("<torch_package"):
+            if env is None:
+                raise ValueError(
+                    "Cannot save torch.package loaded policy without environment. "
+                    "Please provide env parameter to create a fresh policy instance."
+                )
+
+            logger.info("Detected torch.package loaded policy, creating fresh instance")
+            importlib.reload(metta.agent.metta_agent)
+            from metta.agent.metta_agent import make_policy
+
+            fresh_policy = make_policy(env, self._cfg)
+            # Assuming activate_actions info is in metadata
+            if "action_names" in pr.metadata:
+                action_names = pr.metadata["action_names"]
+                # We need max_action_args too, but this might not be in metadata
+                # This is a limitation we'll need to handle
+                if hasattr(env, "max_action_args"):
+                    fresh_policy.activate_actions(action_names, env.max_action_args, self._device)
+
+            fresh_policy.load_state_dict(policy.state_dict(), strict=False)
+            policy = fresh_policy
 
         try:
             with PackageExporter(path, debug=False) as exporter:
