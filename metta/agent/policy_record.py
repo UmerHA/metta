@@ -5,6 +5,7 @@ This is separated from PolicyStore to enable cleaner packaging of saved policies
 
 import copy
 import logging
+import os
 from typing import Optional
 
 import torch
@@ -61,18 +62,41 @@ class PolicyRecord:
     def load(self, path: str, device: str = "cpu") -> nn.Module:
         """Load a policy from a torch package file."""
         logger.info(f"Loading policy from {path}")
+
+        # First check if file exists and is readable
+        if not os.path.exists(path):
+            raise ValueError(f"Policy file does not exist: {path}")
+
+        file_size = os.path.getsize(path)
+        logger.info(f"Policy file size: {file_size} bytes")
+
         try:
             importer = PackageImporter(path)
             try:
                 return importer.load_pickle("policy", "model.pkl", map_location=device)
             except Exception as e:
-                logger.warning(f"Could not load policy directly: {e}")
-                pr = importer.load_pickle("policy_record", "data.pkl", map_location=device)
-                if hasattr(pr, "_policy") and pr._policy is not None:
-                    return pr._policy
-                raise ValueError("PolicyRecord in package does not contain a policy") from e
+                logger.warning(f"Could not load policy directly from torch.package: {e}")
+                # Try loading the PolicyRecord instead
+                try:
+                    pr = importer.load_pickle("policy_record", "data.pkl", map_location=device)
+                    if hasattr(pr, "_policy") and pr._policy is not None:
+                        return pr._policy
+                    raise ValueError("PolicyRecord in package does not contain a policy") from e
+                except Exception as pr_error:
+                    logger.warning(f"Could not load PolicyRecord from torch.package: {pr_error}")
+                    raise ValueError(f"Failed to load policy from torch.package: {e}") from e
         except Exception as e:
             logger.info(f"Not a torch.package file ({e})")
+            # Check if it might be a regular PyTorch checkpoint
+            try:
+                # Try loading as regular torch file to see what's in it
+                checkpoint = torch.load(path, map_location=device, weights_only=False)
+                logger.info(
+                    f"File appears to be a regular PyTorch checkpoint with keys: {list(checkpoint.keys()) if isinstance(checkpoint, dict) else type(checkpoint)}"
+                )
+            except Exception as torch_error:
+                logger.info(f"Also failed to load as regular PyTorch file: {torch_error}")
+
             raise ValueError(f"Cannot load policy from {path}: This file is not a valid torch.package file.") from e
 
     def key_and_version(self) -> tuple[str, int]:

@@ -171,6 +171,16 @@ class PolicyStore:
         # Ensure checkpoint directory exists
         os.makedirs(self._cfg.trainer.checkpoint_dir, exist_ok=True)
 
+        # Extract agent config name if available
+        agent_config_path = None
+        if (
+            hasattr(self._cfg, "agent")
+            and hasattr(self._cfg.agent, "_metadata_")
+            and hasattr(self._cfg.agent._metadata_, "ref")
+        ):
+            # This is the path like "agent/fast"
+            agent_config_path = self._cfg.agent._metadata_.ref
+
         pr = PolicyRecord(
             self,
             name,
@@ -181,6 +191,7 @@ class PolicyStore:
                 "epoch": 0,
                 "generation": 0,
                 "train_time": 0,
+                "agent_config_path": agent_config_path,  # Save the agent config reference
             },
         )
 
@@ -214,6 +225,7 @@ class PolicyStore:
                         "epoch": 0,
                         "generation": 0,
                         "train_time": 0,
+                        "agent_config_path": agent_config_path,
                         "obs_shape": list(env.single_observation_space.shape),
                         "action_space_nvec": list(env.single_action_space.nvec),
                         "feature_normalizations": getattr(env, "feature_normalizations", {}),
@@ -476,12 +488,34 @@ class PolicyStore:
         logger.info(f"Loading legacy checkpoint from {path}")
         checkpoint = torch.load(path, map_location=self._device, weights_only=False)
 
+        # First check if it's a PolicyRecord saved directly (old format)
         if isinstance(checkpoint, PolicyRecord):
             pr = checkpoint
             pr._policy_store = self
             pr._local_path = path
             if pr._policy is None and not metadata_only:
                 raise ValueError("Legacy PolicyRecord has no policy attached")
+            self._cached_prs[path] = pr
+            return pr
+
+        # Check if it's a model saved directly (also old format)
+        if isinstance(checkpoint, nn.Module):
+            logger.info("Checkpoint contains a model directly")
+            pr = PolicyRecord(
+                self,
+                os.path.basename(path),
+                f"file://{path}",
+                {
+                    "action_names": getattr(checkpoint, "action_names", []),
+                    "agent_step": 0,
+                    "epoch": 0,
+                    "generation": 0,
+                    "train_time": 0,
+                },
+            )
+            pr._local_path = path
+            if not metadata_only:
+                pr._policy = checkpoint
             self._cached_prs[path] = pr
             return pr
 
@@ -501,30 +535,112 @@ class PolicyStore:
         pr._local_path = path
 
         if not metadata_only:
-            try:
-                from types import SimpleNamespace
+            # If the checkpoint has a full model saved, use it directly
+            if "model" in checkpoint and isinstance(checkpoint["model"], nn.Module):
+                pr._policy = checkpoint["model"]
+                logger.info("Successfully loaded full model from legacy checkpoint")
+            # Only try to recreate policy if we have agent config
+            elif hasattr(self._cfg, "agent"):
+                try:
+                    from types import SimpleNamespace
 
-                # Create mock environment
-                obs_shape = checkpoint.get("obs_shape", [34, 11, 11])
-                env = SimpleNamespace(
-                    single_observation_space=gym.spaces.Box(low=0, high=255, shape=obs_shape, dtype=np.uint8),
-                    obs_width=obs_shape[1],
-                    obs_height=obs_shape[2],
-                    single_action_space=gym.spaces.MultiDiscrete(checkpoint.get("action_space_nvec", [9, 10])),
-                    feature_normalizations=checkpoint.get("feature_normalizations", {}),
-                    global_features=[],
-                )
+                    # Create mock environment
+                    obs_shape = checkpoint.get("obs_shape", [34, 11, 11])
+                    env = SimpleNamespace(
+                        single_observation_space=gym.spaces.Box(low=0, high=255, shape=obs_shape, dtype=np.uint8),
+                        obs_width=obs_shape[1],
+                        obs_height=obs_shape[2],
+                        single_action_space=gym.spaces.MultiDiscrete(checkpoint.get("action_space_nvec", [9, 10])),
+                        feature_normalizations=checkpoint.get("feature_normalizations", {}),
+                        global_features=[],
+                    )
 
-                policy = make_policy(env, self._cfg)
+                    policy = make_policy(env, self._cfg)
 
-                # Load state dict
-                state_key = next((k for k in ["model_state_dict", "state_dict"] if k in checkpoint), None)
-                policy.load_state_dict(checkpoint.get(state_key, checkpoint))
+                    # Load state dict
+                    state_key = next((k for k in ["model_state_dict", "state_dict"] if k in checkpoint), None)
+                    if state_key:
+                        policy.load_state_dict(checkpoint.get(state_key, checkpoint))
+                    else:
+                        # Try loading the checkpoint directly as state dict
+                        policy.load_state_dict(checkpoint)
 
-                pr._policy = policy
-                logger.info("Successfully loaded legacy checkpoint as MettaAgent")
-            except Exception as e:
-                raise ValueError(f"Cannot load legacy checkpoint as MettaAgent: {e}") from e
+                    pr._policy = policy
+                    logger.info("Successfully reconstructed MettaAgent from state dict")
+                except Exception as e:
+                    logger.warning(f"Cannot reconstruct policy from legacy checkpoint: {e}")
+                    raise ValueError(
+                        f"Cannot load legacy checkpoint as MettaAgent: {e}. "
+                        "This might be because the 'agent' configuration is missing. "
+                        "Try adding '- agent: fast' to your config defaults."
+                    ) from e
+            else:
+                # Try to load agent config from metadata if available
+                agent_config_path = checkpoint.get("agent_config_path")
+                if agent_config_path:
+                    try:
+                        from types import SimpleNamespace
+
+                        from omegaconf import OmegaConf
+
+                        logger.info(f"Loading agent config from metadata: {agent_config_path}")
+
+                        # Load the agent config
+                        # agent_config_path is like "agent/fast" or "agent=fast"
+                        agent_name = agent_config_path.split("/")[-1].split("=")[-1]
+
+                        # Try to load the agent config file directly
+                        agent_config_file = f"configs/agent/{agent_name}.yaml"
+                        if os.path.exists(agent_config_file):
+                            agent_cfg = OmegaConf.load(agent_config_file)
+                            cfg_with_agent = OmegaConf.merge(self._cfg, {"agent": agent_cfg})
+                        else:
+                            # If file doesn't exist, try a simpler approach - just use the agent name
+                            # This assumes the agent config is simple and we can use defaults
+                            logger.warning(
+                                f"Agent config file {agent_config_file} not found, using default agent config"
+                            )
+                            cfg_with_agent = OmegaConf.merge(
+                                self._cfg, {"agent": {"_target_": "metta.agent.metta_agent.MettaAgent"}}
+                            )
+
+                        # Create mock environment
+                        obs_shape = checkpoint.get("obs_shape", [34, 11, 11])
+                        env = SimpleNamespace(
+                            single_observation_space=gym.spaces.Box(low=0, high=255, shape=obs_shape, dtype=np.uint8),
+                            obs_width=obs_shape[1],
+                            obs_height=obs_shape[2],
+                            single_action_space=gym.spaces.MultiDiscrete(checkpoint.get("action_space_nvec", [9, 10])),
+                            feature_normalizations=checkpoint.get("feature_normalizations", {}),
+                            global_features=[],
+                        )
+
+                        policy = make_policy(env, cfg_with_agent)
+
+                        # Load state dict
+                        state_key = next((k for k in ["model_state_dict", "state_dict"] if k in checkpoint), None)
+                        if state_key:
+                            policy.load_state_dict(checkpoint.get(state_key, checkpoint))
+                        else:
+                            # Try loading the checkpoint directly as state dict
+                            policy.load_state_dict(checkpoint)
+
+                        pr._policy = policy
+                        logger.info(
+                            f"Successfully reconstructed MettaAgent using agent config from metadata: {agent_config_path}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to load agent config from metadata: {e}")
+                        raise ValueError(
+                            f"Cannot load legacy checkpoint: No full model found and couldn't load agent config '{agent_config_path}'. "
+                            f"Error: {e}"
+                        ) from e
+                else:
+                    raise ValueError(
+                        "Cannot load legacy checkpoint: No full model found and agent config is missing. "
+                        "Either the checkpoint needs to contain a full model, or you need to add "
+                        "'- agent: fast' (or another agent config) to your config defaults."
+                    )
 
         self._cached_prs[path] = pr
         return pr

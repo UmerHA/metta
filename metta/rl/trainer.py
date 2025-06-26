@@ -700,6 +700,15 @@ class MettaTrainer:
         category_score_values = [v for k, v in category_scores_map.items()]
         overall_score = sum(category_score_values) / len(category_score_values) if category_score_values else 0
 
+        # Extract agent config path if available
+        agent_config_path = None
+        if (
+            hasattr(self.cfg, "agent")
+            and hasattr(self.cfg.agent, "_metadata_")
+            and hasattr(self.cfg.agent._metadata_, "ref")
+        ):
+            agent_config_path = self.cfg.agent._metadata_.ref
+
         metadata = {
             "agent_step": self.agent_step,
             "epoch": self.epoch,
@@ -710,6 +719,7 @@ class MettaTrainer:
             "train_time": training_time,
             "score": overall_score,
             "eval_scores": category_scores_map,
+            "agent_config_path": agent_config_path,  # Save the agent config reference
         }
 
         if isinstance(self.policy, MettaAgent):
