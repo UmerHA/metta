@@ -167,6 +167,10 @@ class PolicyStore:
         policy = make_policy(env, self._cfg)
         name = self.make_model_name(0)
         path = os.path.join(self._cfg.trainer.checkpoint_dir, name)
+
+        # Ensure checkpoint directory exists
+        os.makedirs(self._cfg.trainer.checkpoint_dir, exist_ok=True)
+
         pr = PolicyRecord(
             self,
             name,
@@ -179,8 +183,49 @@ class PolicyStore:
                 "train_time": 0,
             },
         )
-        self._save_policy(path, policy, pr)
-        pr._policy = policy
+
+        try:
+            self._save_policy(path, policy, pr)
+            pr._policy = policy
+
+            # Verify the file was created and is valid
+            if not os.path.exists(path):
+                raise RuntimeError(f"Policy file was not created at {path}")
+
+            # Try to load it back to verify it's valid
+            try:
+                test_pr = self._load_from_file(path, metadata_only=True)
+                logger.info(f"Successfully created and verified initial policy at {path}")
+            except Exception as verify_error:
+                logger.error(f"Created policy file at {path} but failed to verify it: {verify_error}")
+                # Don't raise here, as the file might still be usable
+
+        except Exception as e:
+            logger.error(f"Failed to save initial policy: {e}")
+            # If torch.package save failed, try legacy save as fallback
+            logger.info("Attempting legacy save method as fallback")
+            try:
+                # Save as legacy format
+                torch.save(
+                    {
+                        "model_state_dict": policy.state_dict(),
+                        "action_names": env.action_names,
+                        "agent_step": 0,
+                        "epoch": 0,
+                        "generation": 0,
+                        "train_time": 0,
+                        "obs_shape": list(env.single_observation_space.shape),
+                        "action_space_nvec": list(env.single_action_space.nvec),
+                        "feature_normalizations": getattr(env, "feature_normalizations", {}),
+                    },
+                    path,
+                )
+                pr._policy = policy
+                logger.info(f"Successfully saved initial policy using legacy format at {path}")
+            except Exception as legacy_error:
+                logger.error(f"Failed to save policy using legacy format: {legacy_error}")
+                raise RuntimeError(f"Failed to create initial policy at {path}") from legacy_error
+
         return pr
 
     def save(self, name: str, path: str, policy: nn.Module, metadata: dict) -> PolicyRecord:
@@ -194,9 +239,9 @@ class PolicyStore:
 
         policy_class_name = policy.__class__.__module__
         if "torch_package_" in policy_class_name:
-            logger.error("Policy class name with torch_package_ prefixes! Did you forget to rebuild the agent?")
-            logger.error("Skipping save to prevent pickle errors.")
-            return pr
+            logger.warning(f"Policy has torch_package prefix in module name: {policy_class_name}")
+            logger.warning("This can cause issues with re-packaging. Consider creating a fresh policy instance.")
+            # Don't skip saving - try anyway and let it fail if it must
 
         try:
             with PackageExporter(path, debug=False) as exporter:
@@ -208,8 +253,16 @@ class PolicyStore:
                 exporter.save_pickle("policy_record", "data.pkl", PolicyRecord(None, pr.name, pr.uri, clean_metadata))
                 exporter.save_pickle("policy", "model.pkl", policy)
 
+            logger.info(f"Successfully saved policy to {path}")
         except Exception as e:
             logger.error(f"torch.package save failed: {e}")
+            # Try to clean up partial file if it exists
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    logger.info(f"Cleaned up partial file at {path}")
+                except Exception:
+                    pass
             raise RuntimeError(f"Failed to save policy using torch.package: {e}") from e
 
         pr._local_path = path
@@ -386,8 +439,20 @@ class PolicyStore:
             return pr
         except Exception as e:
             logger.debug(f"Not a torch.package file: {e}")
-            if "PytorchStreamReader failed locating file .data/extern_modules" in str(e):
-                logger.info("Detected old checkpoint format, loading as regular PyTorch checkpoint")
+            # Expand the fallback to handle more cases of torch.package loading failures
+            if any(
+                err_msg in str(e)
+                for err_msg in [
+                    "PytorchStreamReader failed locating file .data/extern_modules",
+                    "This file is not a valid torch.package file",
+                    "Failed to open file",
+                    "Invalid magic number",
+                    "archive does not contain",
+                ]
+            ):
+                logger.info(
+                    "Detected potential old checkpoint format or corrupted torch.package, attempting legacy load"
+                )
                 return self._load_legacy_checkpoint(path, metadata_only)
             raise ValueError(f"Failed to load policy from {path}: {e}") from e
 
