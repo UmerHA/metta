@@ -20,14 +20,15 @@ class PackedCoordinate:
     def pack(row: int, col: int) -> int:
         """Pack (row, col) coordinates into a single byte.
         Args:
-            row: Row coordinate (0-14)
-            col: Column coordinate (0-14)
+            row: Row coordinate (0–14). Must be <= MAX_PACKABLE_COORD.
+            col: Column coordinate (0–14). Must be <= MAX_PACKABLE_COORD.
         Returns:
-            Packed byte value
+            Packed byte value (0–254). Value 0xFF (255) is reserved to indicate 'empty'.
         Note:
-            The value 0xFF is reserved to indicate 'empty'.
-        Raises:
-            ValueError: If row or col > 14
+            In debug configurations, assertions may be used to check bounds.
+            In release mode, invalid inputs may result in undefined behavior.
+        Warning:
+            This function assumes inputs are pre-validated or within range.
         """
         ...
 

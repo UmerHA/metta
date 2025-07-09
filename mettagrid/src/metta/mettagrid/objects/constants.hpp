@@ -19,10 +19,6 @@ constexpr ObservationType ObjectLayer = 1;
 constexpr ObservationType GridLayerCount = 2;
 };  // namespace GridLayer
 
-// We want empty tokens to be 0xff, since 0s are very natural numbers to have in the observations, and we want
-// empty to be obviously different.
-const uint8_t EmptyTokenByte = 0xff;
-
 // Changing observation feature ids will break models that have
 // been trained on the old feature ids.
 // In the future, the string -> id mapping should be stored on a

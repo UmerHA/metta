@@ -27,7 +27,7 @@
 #include "objects/production_handler.hpp"
 #include "objects/wall.hpp"
 #include "observation_encoder.hpp"
-#include "packed_coordinate.hpp"
+#include "observation_token.hpp"
 #include "stats_tracker.hpp"
 #include "types.hpp"
 

@@ -599,15 +599,5 @@ class TestPackedCoordinate:
         assert not PackedCoordinate.is_empty(0xE0)
         assert not PackedCoordinate.is_empty(0xEE)
 
-        # Test invalid coordinates
-        invalid_coords = [(15, 0), (0, 15), (15, 15), (16, 0), (0, 16), (255, 255)]
-        for row, col in invalid_coords:
-            try:
-                PackedCoordinate.pack(row, col)
-                raise AssertionError(f"Should have raised exception for ({row}, {col})")
-            except ValueError:
-                pass  # Expected
-
-        print("PackedCoordinate tests passed!")
-        print(f"Can pack {successfully_packed}/256 positions")
-        print("0xFF is reserved for EMPTY marker")
+        # No longer test invalid inputs: PackedCoordinate.pack uses asserts, not exceptions.
+        # Invalid values now result in undefined behavior in release builds.

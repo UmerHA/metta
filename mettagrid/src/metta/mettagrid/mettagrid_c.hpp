@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "grid_object.hpp"
-#include "packed_coordinate.hpp"
+#include "observation_token.hpp"
 #include "types.hpp"
 
 // Forward declarations of existing C++ classes
