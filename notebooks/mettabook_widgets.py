@@ -1,18 +1,19 @@
 import os
+import re
+import subprocess
+import threading
 from datetime import datetime
 
 import ipywidgets as widgets
+import wandb
 import yaml
-from IPython.display import clear_output, display
+from IPython.display import IFrame, clear_output, display
 
 
 def _load_available_environments():
     config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "sim", "all.yaml")
-
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
-
-    # Extract all env values from the simulations section
     environments = []
     if "simulations" in config:
         for sim_config in config["simulations"].values():
@@ -64,6 +65,7 @@ class TrainingConfigurator:
 
         self.cmd_preview_output = widgets.Output()
         self._setup_observers()
+        self._update_command_preview()
 
     def _setup_observers(self):
         """Set up observers for input changes."""
@@ -98,14 +100,12 @@ class TrainingConfigurator:
     def _update_command_preview(self, *args):
         """Update the command preview display."""
         with self.cmd_preview_output:
-            clear_output()
+            clear_output(wait=True)
             cmd = self.generate_launch_command()
             print("Launch command:")
             print(" ".join(cmd))
 
     def display(self):
-        """Display the configuration widgets."""
-        self._update_command_preview()
         return widgets.VBox(
             [
                 widgets.HTML("<b>Training Configuration:</b>"),
@@ -135,53 +135,61 @@ class JobLauncher:
         self.output = widgets.Output()
         self.job_id = None
         self.job_name = None
+        self.is_launching = False
 
         self.launch_button.on_click(self._launch_training)
 
     def _launch_training(self, b):
-        """Launch the training job."""
-        import subprocess
+        if self.is_launching:
+            return
 
-        with self.output:
-            clear_output()
-            print("🚀 Launching training job...")
+        self.is_launching = True
+        self.launch_button.disabled = True  # Disable button during launch
 
-            cmd = self.configurator.generate_launch_command()
-            self.job_name = self.configurator.run_name_input.value
+        try:
+            with self.output:
+                clear_output(wait=True)  # Clear any pending output
+                print("🚀 Launching training job...")
 
-            print(f"\nCommand: {' '.join(cmd)}")
-            print("\n" + "=" * 50)
+                cmd = self.configurator.generate_launch_command()
+                self.job_name = self.configurator.run_name_input.value
 
-            try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    cwd=os.path.dirname(os.path.dirname(os.path.abspath("__file__"))),
-                )
+                print(f"\nCommand: {' '.join(cmd)}")
+                print("\n" + "=" * 50)
 
-                for line in process.stdout or []:
-                    print(line, end="")
-                    if "Job ID:" in line or "sky-" in line:
-                        parts = line.split()
-                        for part in parts:
-                            if part.startswith("sky-") and "-" in part[4:]:
-                                self.job_id = part
-                                print(f"\n✓ Job ID captured: {self.job_id}")
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        cwd=os.path.dirname(os.path.dirname(os.path.abspath("__file__"))),
+                    )
 
-                process.wait()
+                    for line in process.stdout or []:
+                        print(line, end="")
+                        if "Job ID:" in line or "sky-" in line:
+                            parts = line.split()
+                            for part in parts:
+                                if part.startswith("sky-") and "-" in part[4:]:
+                                    self.job_id = part
+                                    print(f"\nJob ID captured: {self.job_id}")
 
-                if process.returncode == 0:
-                    print("\nJob launched successfully!")
-                    if self.job_id:
-                        print(f"Job ID: {self.job_id}")
-                    print(f"Job Name: {self.job_name}")
-                else:
-                    print(f"\nLaunch failed with return code: {process.returncode}")
+                    process.wait()
 
-            except Exception as e:
-                print(f"\nError launching job: {str(e)}")
+                    if process.returncode == 0:
+                        print("\nJob launched successfully!")
+                        if self.job_id:
+                            print(f"Job ID: {self.job_id}")
+                        print(f"Job Name: {self.job_name}")
+                    else:
+                        print(f"\nLaunch failed with return code: {process.returncode}")
+
+                except Exception as e:
+                    print(f"\nError launching job: {str(e)}")
+        finally:
+            self.is_launching = False
+            self.launch_button.disabled = False
 
     def display(self):
         """Display the launcher widgets."""
@@ -201,7 +209,7 @@ class JobStatusMonitor:
             tooltip="Refresh job status",
             icon="refresh",
         )
-        self.auto_refresh_checkbox = widgets.Checkbox(value=True, description="Auto-refresh every 30s", disabled=False)
+        self.auto_refresh_checkbox = widgets.Checkbox(value=True, description="Auto-refresh every 15s", disabled=False)
 
         self.refresh_timer = None
         self.is_checking = False
@@ -217,10 +225,6 @@ class JobStatusMonitor:
                 self.check_job_status()
 
     def check_job_status(self):
-        """Check the status of the job."""
-        import subprocess
-
-        # Prevent concurrent checks
         if self.is_checking:
             return
 
@@ -267,30 +271,22 @@ class JobStatusMonitor:
             self.is_checking = False
 
     def _toggle_auto_refresh(self, change):
-        """Toggle auto-refresh."""
         if change["new"]:
             self._start_auto_refresh()
         else:
             self._stop_auto_refresh()
 
     def _stop_auto_refresh(self):
-        """Stop any existing auto-refresh timer."""
         if self.refresh_timer:
             self.refresh_timer.cancel()
             self.refresh_timer = None
 
     def _start_auto_refresh(self):
-        """Start auto-refresh, canceling any existing timer first."""
-        import threading
-
-        # Cancel any existing timer
         self._stop_auto_refresh()
 
         if self.auto_refresh_checkbox.value:
-            # Run the check immediately
             self.check_job_status()
-            # Schedule the next check
-            self.refresh_timer = threading.Timer(30.0, self._start_auto_refresh)
+            self.refresh_timer = threading.Timer(15.0, self._start_auto_refresh)
             self.refresh_timer.start()
 
     def _auto_refresh(self):
@@ -311,14 +307,10 @@ class JobStatusMonitor:
 
 
 class WandBConnector:
-    """Manages W&B connection and run monitoring."""
-
     def __init__(self):
         self.output = widgets.Output()
         self.api = None
         self.run = None
-
-        self.use_specific_run = widgets.Checkbox(value=True, description="Use specific run:", disabled=False)
 
         self.specific_run_input = widgets.Text(
             value="",
@@ -339,9 +331,6 @@ class WandBConnector:
         self.connect_button.on_click(self._connect_to_wandb)
 
     def _connect_to_wandb(self, b):
-        """Connect to W&B run."""
-        import wandb
-
         with self.output:
             clear_output()
             print("Connecting to W&B...")
@@ -349,11 +338,7 @@ class WandBConnector:
             try:
                 self.api = wandb.Api()
 
-                if self.use_specific_run.value:
-                    run_path = f"metta-research/metta/{self.specific_run_input.value}"
-                else:
-                    # Would need to pass in job_name from launcher
-                    run_path = "metta-research/metta/default-run"
+                run_path = f"metta-research/metta/{self.specific_run_input.value}"
 
                 print(f"\nLooking for run: {run_path}")
 
@@ -372,21 +357,13 @@ class WandBConnector:
 
             except Exception as e:
                 print(f"\nError connecting to W&B: {str(e)}")
-                print("\nMake sure:")
-                print("1. Your W&B API key is set correctly")
-                print("2. The run exists and you have access")
-                print("3. The run name/ID is correct")
+                print("\nMake sure you are connected to W&B: `metta status`")
 
     def display(self):
-        """Display the W&B connector widgets."""
-        return widgets.VBox(
-            [widgets.HBox([self.use_specific_run, self.specific_run_input]), self.connect_button, self.output]
-        )
+        return widgets.VBox([widgets.HBox([self.specific_run_input]), self.connect_button, self.output])
 
 
 class MetricsFetcher:
-    """Fetches metrics from W&B with configurable options."""
-
     def __init__(self, wandb_connector):
         self.wandb_connector = wandb_connector
         self.metrics_df = None
@@ -456,7 +433,6 @@ class MetricsFetcher:
                 print(f"\nError fetching metrics: {str(e)}")
 
     def display(self):
-        """Display the metrics fetcher widgets."""
         return widgets.VBox(
             [
                 widgets.HTML("<b>Fetch Options:</b>"),
@@ -468,7 +444,6 @@ class MetricsFetcher:
         )
 
     def auto_fetch(self):
-        """Auto-fetch if connected."""
         if self.wandb_connector.run:
             self._fetch_metrics(None)
 
@@ -498,9 +473,6 @@ class ReplayViewer:
         self.replay_selector.observe(self._on_replay_selected, names="value")
 
     def _fetch_replays(self, b):
-        """Fetch replay URLs from W&B files."""
-        import re
-
         with self.output:
             clear_output()
 
@@ -578,7 +550,6 @@ class ReplayViewer:
                 print(f"Error accessing run files: {e}")
 
     def _on_replay_selected(self, change):
-        """Handle replay selection."""
         if change["new"] is not None and 0 <= change["new"] < len(self.replay_urls):
             selected = self.replay_urls[change["new"]]
             self.selected_replay_url = selected["url"]
@@ -588,15 +559,11 @@ class ReplayViewer:
                 print(f"Selected replay at step {selected['step']:,}")
 
     def display(self):
-        """Display the replay viewer widgets."""
         return widgets.VBox(
             [widgets.HTML("<b>Replay Viewer:</b>"), self.view_button, self.replay_selector, self.output]
         )
 
     def display_iframe(self, width=1000, height=600):
-        """Display the selected replay in an iframe."""
-        from IPython.display import IFrame, display
-
         if self.selected_replay_url:
             print("Loading MettaScope viewer...")
             print(f"\nDirect link: {self.selected_replay_url}")
