@@ -11,7 +11,7 @@ cmd: sweep
 sweep_run: ???  # Will be set via command line override
 
 trainer:
-  total_timesteps: 500_000_000   # 500M timesteps for proper RL training (was 50k - too short!)
+  total_timesteps: 500_000_000   # 500M timesteps for proper RL training
   curriculum: /env/mettagrid/arena/basic_easy_shaped
 
 
