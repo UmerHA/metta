@@ -1,4 +1,5 @@
 import logging
+from abc import ABC, abstractmethod
 from typing import List, Optional
 
 from omegaconf import DictConfig
@@ -37,6 +38,7 @@ class CurriculumAlgorithm:
     
 
 
+<<<<<<< HEAD
 class Curriculum:
     def __init__(self, task_set: TaskSet, curriculum_algorithm: CurriculumAlgorithm):
         self._task_set = task_set
@@ -66,6 +68,8 @@ class Curriculum:
         return {}
 
 
+=======
+>>>>>>> b9a053e16 (cp)
 class Task:
     def __init__(self, id: str, curriculum: "Curriculum", env_cfg: Optional[DictConfig] = None):
         self._id = id
@@ -94,6 +98,47 @@ class Task:
     def short_name(self) -> str:
         return self._name.split("/")[-1]
 
+<<<<<<< HEAD
+=======
+
+class TaskSet:
+    def __init__(self, tasks: List[str], task_generator: Callable[[str], DictConfig]):
+        self._tasks = tasks
+        self._task_generator = task_generator
+
+    def ge(self) -> Task:
+        return Task(task_id, self, self._task_generator(task_id))
+
+
+class Curriculum(ABC):
+    def __init__(self, task_set: TaskSet, inita):
+        self._task_set = task_set
+
+    @abstractmethod
+    def _sample_task_id(self) -> str:
+        pass
+
+    def complete_task(self, id: str, score: float):
+        # logger.info(f"Task completed: {id} -> {score:.5f}")
+        pass
+
+    def completed_tasks(self) -> List[str]:
+        """Return a list of completed task identifiers."""
+        return []
+
+    def get_completion_rates(self):
+        """Return a dictionary of completion rates for each task."""
+        return {}
+
+    def get_task_probs(self) -> dict[str, float]:
+        """Return the current task probabilities for logging purposes."""
+        return {}
+
+    def get_curriculum_stats(self) -> dict:
+        """Return curriculum statistics for logging purposes (default: empty)."""
+        return {}
+
+>>>>>>> b9a053e16 (cp)
 
 class SingleTaskCurriculum(Curriculum):
     """Curriculum that only contains a single task."""
