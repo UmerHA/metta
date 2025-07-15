@@ -1,5 +1,5 @@
 """
-TaskTrees are a graph where nodes have two possible types:
+TaskTrees are trees where nodes have two possible types:
 * MettaGridTask: A specific environment configuration for MettaGrid
 * TaskTree: The root of a task tree whose children are either MettaGridTask or TaskTrees
 
@@ -71,10 +71,6 @@ class MettaGridTask(TaskTreeNode):
 
 
 class TaskTree(TaskTreeNode):
-    weights: np.ndarray = np.array([], dtype=np.float32)
-    curriculum_algorithm: CurriculumAlgorithm
-    children: list["TaskTreeNode"] = []
-
     def __init__(
         self,
         curriculum_algorithm: CurriculumAlgorithm,
@@ -87,7 +83,9 @@ class TaskTree(TaskTreeNode):
         self.num_children = len(children)
         self.curriculum_algorithm = curriculum_algorithm
         self.completed_tasks = np.zeros(self.num_children, dtype=np.int32)
+        self.sampled_tasks = np.zeros(self.num_children, dtype=np.int32)
         self.total_completed_tasks = 0
+        self.total_sampled_tasks = 0
         if self.num_children == 0:
             raise ValueError("TaskTree must have at least one child")
         if names is not None:
@@ -102,18 +100,21 @@ class TaskTree(TaskTreeNode):
             self.weights = np.array(weights, dtype=np.float32)
         else:
             self.weights = np.ones(self.num_children, dtype=np.float32)
+        if not np.all(self.weights >= 0):
+            raise ValueError(f"Weights must be non-negative: {self.weights}")
+        if self.weights.sum() <= 0:
+            raise ValueError(f"Weights must be non-zero-sum. weights {self.weights} sum: {self.weights.sum()}")
+        self.probabilities = self.weights / self.weights.sum()
 
         # Set parent references
         for i, child in enumerate(children):
             child.set_as_child(self, i, self.names[i] if self.names is not None else None)
 
-    @property
-    def probabilities(self) -> np.ndarray:
-        return self.weights / self.weights.sum()
-
-    def sample(self) -> MettaGridTask:
+    def sample(self) -> tuple[MettaGridTask, int]:
         child_idx = np.random.choice(self.num_children, p=self.probabilities)
         selected_child = self.children[child_idx]
+        self.sampled_tasks[child_idx] += 1
+        self.total_sampled_tasks += 1
         return selected_child.sample()
 
     def full_name(self, child_idx: int) -> str:
@@ -126,6 +127,7 @@ class TaskTree(TaskTreeNode):
         self.completed_tasks[child_idx] += 1
         self.total_completed_tasks += 1
         self.curriculum_algorithm.update_weights(self.weights, child_idx, score)
+        self._update_probabilities()
         if self.parent is not None:
             full_name = name
             if self.names is not None:
@@ -134,27 +136,48 @@ class TaskTree(TaskTreeNode):
 
     def get_completion_rates(self) -> dict[str, int]:
         if self.total_completed_tasks != 0:
-            return self.completion_dict_with_prefix("tasks_completions/")
+            return self._completion_dict_with_prefix("task_completions/")
+        else:
+            return dict()
+
+    def get_sample_rates(self) -> dict[str, int]:
+        if self.total_sampled_tasks != 0:
+            return self._sample_dict_with_prefix("task_samples/")
         else:
             return dict()
 
     def get_task_probabilities(self, relative_to_root: bool = False) -> dict[str, float]:
-        return self.probability_dict_with_prefix(relative_to_root=relative_to_root)
+        return self._probability_dict_with_prefix(relative_to_root=relative_to_root)
 
     def get_curriculum_stats(self) -> dict[str, float]:
         return self.curriculum_algorithm.stats()
 
-    def completion_dict_with_prefix(self, prefix: str = "") -> dict[str, int]:
+    def _update_probabilities(self):
+        assert self.weights.sum() > 0, f"Weights must be non-zero-sum. weights {self.weights} sum: {self.weights.sum()}"
+        assert np.all(self.weights >= 0), f"Weights must be non-negative. weights {self.weights}"
+        self.probabilities = self.weights / self.weights.sum()
+
+    def _completion_dict_with_prefix(self, prefix: str = "") -> dict[str, int]:
         result = dict()
         for child_idx in range(self.num_children):
             result[f"{prefix}{self.full_name(child_idx)}"] = self.completed_tasks[child_idx]
             if isinstance(self.children[child_idx], TaskTree):
                 result.update(
-                    self.children[child_idx].completion_dict_with_prefix(f"{prefix}{self.full_name(child_idx)}/")
+                    self.children[child_idx]._completion_dict_with_prefix(f"{prefix}{self.full_name(child_idx)}/")
                 )
         return result
 
-    def probability_dict_with_prefix(
+    def _sample_dict_with_prefix(self, prefix: str = "") -> dict[str, int]:
+        result = dict()
+        for child_idx in range(self.num_children):
+            result[f"{prefix}{self.full_name(child_idx)}"] = self.sampled_tasks[child_idx]
+            if isinstance(self.children[child_idx], TaskTree):
+                result.update(
+                    self.children[child_idx]._sample_dict_with_prefix(f"{prefix}{self.full_name(child_idx)}/")
+                )
+        return result
+
+    def _probability_dict_with_prefix(
         self, prefix: str = "", relative_to_root: bool = False, base_prob: float = 1.0
     ) -> dict[str, float]:
         """
@@ -170,7 +193,7 @@ class TaskTree(TaskTreeNode):
             probs[f"{prefix}{self.full_name(child_idx)}"] = child_prob
             if isinstance(self.children[child_idx], TaskTree):
                 probs.update(
-                    self.children[child_idx].probability_dict_with_prefix(
+                    self.children[child_idx]._probability_dict_with_prefix(
                         f"{prefix}{self.full_name(child_idx)}/",
                         relative_to_root,
                         self.probabilities[child_idx] * base_prob,
@@ -178,6 +201,44 @@ class TaskTree(TaskTreeNode):
                 )
 
         return probs
+
+    def __repr__(self) -> str:
+        """Return a tree representation showing structure, weights, and algorithms."""
+        return self._tree_repr(indent=0)
+
+    def _tree_repr(self, indent: int = 0, prefix: str = "") -> str:
+        """Recursive helper to build tree representation."""
+        indent_str = "  " * indent
+        lines = []
+
+        # Current node info
+        algo_name = type(self.curriculum_algorithm).__name__
+        lines.append(f"{indent_str}{prefix}TaskTree({algo_name})")
+
+        # Show weights and probabilities for children
+        for i, child in enumerate(self.children):
+            weight = self.weights[i]
+            prob = self.probabilities[i]
+            child_name = self.names[i] if self.names is not None else f"child_{i}"
+
+            # Prefix for last child vs others
+            is_last = i == len(self.children) - 1
+            branch = "└─" if is_last else "├─"
+            continuation = "  " if is_last else "│ "
+
+            # Child info
+            child_info = f"{indent_str}{branch} [{child_name}] w={weight:.3f} p={prob:.3f}"
+
+            if isinstance(child, TaskTree):
+                # Recursive case
+                lines.append(child_info)
+                subtree = child._tree_repr(indent + 1, prefix=continuation)
+                lines.append(subtree)
+            else:
+                # Leaf case (MettaGridTask)
+                lines.append(f"{child_info} -> {child.name}")
+
+        return "\n".join(lines)
 
 
 def task_set(
@@ -190,13 +251,15 @@ def task_set(
 
     Args:
         curriculum_algorithm: Algorithm for updating weights based on task performance
-        task_configs: Dict mapping task names to DictConfig objects
+        task_configs: Dict mapping config paths to DictConfig objects
         task_weights: Optional dict mapping task names to weights
 
     Returns:
         TaskTree initialized with the given configuration
     """
-    names = list(task_configs.keys())
+
+    def short_name(config_path: str) -> str:
+        return config_path.split("/")[-1]
 
     def config_with_overrides(config: DictConfig, env_overrides: Optional[DictConfig]) -> DictConfig:
         """Create a new config with overrides applied."""
@@ -206,13 +269,9 @@ def task_set(
         OmegaConf.merge(config, env_overrides)
         return config
 
-    configs = [config_with_overrides(task_configs[name], env_overrides) for name in names]
-
-    if task_weights is None:
-        weights = None
-    else:
-        weights = np.array([task_weights.get(name, 1.0) for name in names], dtype=np.float32)
+    tasks = [MettaGridTask(short_name(k), config_with_overrides(v, env_overrides)) for k, v in task_configs.items()]
 
     if curriculum_algorithm is None:
         curriculum_algorithm = UniformRandomCurriculum()
-    return TaskTree(curriculum_algorithm, names, configs, weights)
+
+    return TaskTree(curriculum_algorithm, tasks, weights=task_weights)
