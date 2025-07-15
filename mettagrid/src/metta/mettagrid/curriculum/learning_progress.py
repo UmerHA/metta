@@ -17,6 +17,15 @@ DEFAULT_WEIGHT = 1.0
 RANDOM_BASELINE_CAP = 0.75
 
 
+class LearningProgress(CurriculumAlgorithm):
+    def __init__(self, num_tasks: int):
+        self.num_tasks = num_tasks
+        self.task_weights = np.ones(num_tasks) / num_tasks
+
+    def update_weights(self, weights: np.ndarray, task_idx: int, score: float):
+        pass
+
+
 class LearningProgressCurriculum(RandomCurriculum):
     """Curriculum that adaptively samples tasks based on learning progress."""
 

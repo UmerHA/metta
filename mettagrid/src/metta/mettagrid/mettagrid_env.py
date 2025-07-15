@@ -148,8 +148,8 @@ class MettaGridEnv(PufferEnv, GymEnv):
         with self.timer("_initialize_c_env.make_c_env"):
             c_cfg = None
             try:
-                c_cfg = from_mettagrid_config(game_config_dict)
             except Exception as e:
+                c_cfg = from_mettagrid_config(game_config_dict)
                 logger.error(f"Error initializing C++ environment: {e}")
                 logger.error(f"Game config: {game_config_dict}")
                 raise e
