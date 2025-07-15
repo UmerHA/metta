@@ -1,13 +1,18 @@
-from __future__ import annotations
+"""
+Learning Progress Curriculum Algorithm for TaskTree.
+
+This module implements the learning progress algorithm as a CurriculumAlgorithm
+that can be used with TaskTree nodes to adaptively sample tasks based on
+bidirectional learning progress tracking.
+"""
 
 import logging
 from typing import Dict, Tuple
 
 import numpy as np
 from gymnasium.spaces import Discrete
-from omegaconf import DictConfig
 
-from metta.mettagrid.curriculum.random import RandomCurriculum
+from metta.mettagrid.curriculum.task_tree import CurriculumAlgorithm
 
 logger = logging.getLogger(__name__)
 
@@ -17,22 +22,16 @@ DEFAULT_WEIGHT = 1.0
 RANDOM_BASELINE_CAP = 0.75
 
 
-class LearningProgress(CurriculumAlgorithm):
-    def __init__(self, num_tasks: int):
-        self.num_tasks = num_tasks
-        self.task_weights = np.ones(num_tasks) / num_tasks
+class LearningProgressAlgorithm(CurriculumAlgorithm):
+    """Curriculum algorithm that adaptively samples tasks based on learning progress.
 
-    def update_weights(self, weights: np.ndarray, task_idx: int, score: float):
-        pass
-
-
-class LearningProgressCurriculum(RandomCurriculum):
-    """Curriculum that adaptively samples tasks based on learning progress."""
+    Uses bidirectional learning progress with fast and slow exponential moving averages
+    to identify tasks with the highest learning potential.
+    """
 
     def __init__(
         self,
-        tasks: Dict[str, float],
-        env_overrides: DictConfig | None = None,
+        num_tasks: int,
         ema_timescale: float = 0.001,
         progress_smoothing: float = 0.05,
         num_active_tasks: int = 16,
@@ -40,12 +39,20 @@ class LearningProgressCurriculum(RandomCurriculum):
         sample_threshold: int = 10,
         memory: int = 25,
     ):
-        super().__init__(tasks, env_overrides)
+        """Initialize learning progress algorithm.
 
-        # Initialize learning progress tracker
-        search_space_size = len(tasks)
+        Args:
+            num_tasks: Number of tasks this algorithm will manage
+            ema_timescale: Exponential moving average time constant
+            progress_smoothing: Smoothing parameter for progress calculation
+            num_active_tasks: Number of tasks to keep active
+            rand_task_rate: Rate of random task selection
+            sample_threshold: Minimum samples before updating distribution
+            memory: Number of recent outcomes to remember per task
+        """
+        self.num_tasks = num_tasks
         self._lp_tracker = BidirectionalLearningProgress(
-            search_space=search_space_size,
+            search_space=num_tasks,
             ema_timescale=ema_timescale,
             progress_smoothing=progress_smoothing,
             num_active_tasks=num_active_tasks,
@@ -54,37 +61,51 @@ class LearningProgressCurriculum(RandomCurriculum):
             memory=memory,
         )
 
-        logger.info(f"LearningProgressCurriculum initialized with {search_space_size} tasks")
+        # Reference to owning TaskTree (set by TaskTree during initialization)
+        self.task_tree = None
 
-    def complete_task(self, id: str, score: float):
-        """Complete a task and update learning progress tracking."""
+    def update_weights(self, weights: np.ndarray, child_idx: int, score: float) -> None:
+        """Update task weights based on learning progress.
+
+        Args:
+            weights: Current weights array to update in-place
+            child_idx: Index of the child that completed a task
+            score: Score achieved (between 0 and 1)
+
+        Note:
+            The weights array is updated in-place. The TaskTree will handle
+            normalization automatically via its _update_probabilities() method.
+        """
         # Convert score to success rate (assuming score is between 0 and 1)
         success_rate = max(0.0, min(1.0, score))
 
-        # Get task index for learning progress tracking
-        task_idx = list(self._curricula.keys()).index(id)
-
         # Collect data for learning progress
-        self._lp_tracker.collect_data({f"tasks/{task_idx}": [success_rate]})
+        self._lp_tracker.collect_data({f"tasks/{child_idx}": [success_rate]})
 
         # Update task weights based on learning progress
         lp_weights, _ = self._lp_tracker.calculate_dist()
 
         # Update weights based on learning progress
-        for i, task_id in enumerate(self._curricula.keys()):
-            if i < len(lp_weights):
-                self._task_weights[task_id] = lp_weights[i]
+        if len(lp_weights) >= self.num_tasks:
+            for i in range(self.num_tasks):
+                weights[i] = lp_weights[i]
+        else:
+            # Fallback to uniform if not enough data
+            weights.fill(1.0)
 
-        # Normalize weights
-        total_weight = sum(self._task_weights.values())
-        if total_weight > 0:
-            self._task_weights = {k: v / total_weight for k, v in self._task_weights.items()}
+    def stats(self, prefix: str = "") -> dict[str, float]:
+        """Return learning progress statistics for logging.
 
-        super().complete_task(id, score)
+        Args:
+            prefix: Prefix to add to all stat keys
 
-    def stats(self) -> Dict[str, float]:
-        """Get learning progress statistics for logging."""
-        return self._lp_tracker.add_stats()
+        Returns:
+            Dictionary of statistics with optional prefix
+        """
+        stats = self._lp_tracker.add_stats()
+        if prefix:
+            return {f"{prefix}{k}": v for k, v in stats.items()}
+        return stats
 
 
 class BidirectionalLearningProgress:
@@ -132,15 +153,19 @@ class BidirectionalLearningProgress:
     def add_stats(self) -> Dict[str, float]:
         """Return learning progress statistics for logging."""
         stats = {}
-        stats["lp/num_active_tasks"] = len(self._sample_levels)
-        stats["lp/mean_sample_prob"] = np.mean(self._task_dist)
-        stats["lp/num_zeros_lp_dist"] = np.sum(self._task_dist == 0)
-        stats["lp/task_1_success_rate"] = self._task_success_rate[0]
-        stats[f"lp/task_{self._num_tasks // 2}_success_rate"] = self._task_success_rate[self._num_tasks // 2]
-        stats["lp/last_task_success_rate"] = self._task_success_rate[-1]
-        stats["lp/task_success_rate"] = np.mean(self._task_success_rate)
-        stats["lp/mean_evals_per_task"] = self._mean_samples_per_eval[-1]
-        stats["lp/num_nan_tasks"] = self._num_nans[-1]
+        stats["lp/num_active_tasks"] = len(self._sample_levels) if self._sample_levels is not None else 0
+        stats["lp/mean_sample_prob"] = np.mean(self._task_dist) if self._task_dist is not None else 0.0
+        stats["lp/num_zeros_lp_dist"] = np.sum(self._task_dist == 0) if self._task_dist is not None else 0
+        stats["lp/task_1_success_rate"] = self._task_success_rate[0] if len(self._task_success_rate) > 0 else 0.0
+        stats[f"lp/task_{self._num_tasks // 2}_success_rate"] = (
+            self._task_success_rate[self._num_tasks // 2]
+            if len(self._task_success_rate) > self._num_tasks // 2
+            else 0.0
+        )
+        stats["lp/last_task_success_rate"] = self._task_success_rate[-1] if len(self._task_success_rate) > 0 else 0.0
+        stats["lp/task_success_rate"] = np.mean(self._task_success_rate) if len(self._task_success_rate) > 0 else 0.0
+        stats["lp/mean_evals_per_task"] = self._mean_samples_per_eval[-1] if self._mean_samples_per_eval else 0.0
+        stats["lp/num_nan_tasks"] = self._num_nans[-1] if self._num_nans else 0
         return stats
 
     def _update(self):
